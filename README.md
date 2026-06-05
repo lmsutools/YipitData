@@ -105,10 +105,11 @@ All protected routes require `Authorization: Bearer <token>`.
 |--------|------|-------------|
 | `POST` | `/auth/login` | Returns JWT |
 | `GET` | `/sectors` | List sectors with company counts |
+| `GET` | `/retailers` | List all retail channel partners |
 | `GET` | `/companies` | List companies (`?sector=footwear&search=nike`) |
-| `GET` | `/companies/:id` | Company detail + latest MTD snapshot |
-| `GET` | `/companies/:id/estimates` | Time-series estimates (`?kpiId=1&dateFrom=2024-01-01&dateTo=2025-01-01&type=historical`) |
-| `POST` | `/estimates` | Publish new estimate → triggers SSE push |
+| `GET` | `/companies/:id` | Company detail + retailer list + latest MTD snapshot per retailer |
+| `GET` | `/companies/:id/estimates` | Time-series estimates (`?kpiId=1&retailerId=2&dateFrom=2025-05-01&dateTo=2026-06-01&type=historical`) |
+| `POST` | `/estimates` | Publish new estimate → triggers SSE push (requires `retailerId`) |
 | `GET` | `/kpis` | List KPI definitions |
 | `GET` | `/notifications/stream?token=<jwt>` | SSE stream for real-time notifications |
 | `GET` | `/health` | Health check |
@@ -120,9 +121,10 @@ curl -X POST http://localhost:3000/estimates \
   -H "Content-Type: application/json" \
   -d '{
     "companyId": 1,
+    "retailerId": 2,
     "kpiId": 1,
-    "periodMonth": "2025-06-01",
-    "estimateValue": 32000000,
+    "periodMonth": "2026-06-01",
+    "estimateValue": 120000000,
     "estimateType": "mtd"
   }'
 ```
@@ -138,13 +140,14 @@ The same database that powers the REST API is exposed as an MCP server for AI ag
 | Tool | Description |
 |------|-------------|
 | `list_sectors()` | All sectors with company counts |
+| `list_retailers()` | All retail channel partners |
 | `list_companies(sector?, search?)` | Companies, filterable by sector/name |
-| `get_company(companyId)` | Company detail |
+| `get_company(companyId)` | Company detail + retailer partners + latest MTD |
 | `list_kpis()` | Available KPI definitions |
-| `get_estimates(companyId, kpiId?, dateFrom?, dateTo?, type?)` | Time-series KPI data |
-| `get_mtd_snapshot(companyId, kpiId?)` | Latest MTD estimates |
-| `compare_periods(companyId, kpiId, period1, period2)` | YOY/MOM delta between two months |
-| `publish_estimate(companyId, kpiId, periodMonth, estimateValue, estimateType)` | Insert new estimate |
+| `get_estimates(companyId, kpiId?, retailerId?, dateFrom?, dateTo?, type?)` | Time-series KPI data, optionally scoped to one retailer |
+| `get_mtd_snapshot(companyId, kpiId?, retailerId?)` | Latest MTD estimates per retailer (most recent intraday snapshot) |
+| `compare_periods(companyId, kpiId, period1, period2, retailerId?)` | YOY/MOM delta; aggregates across retailers if retailerId omitted |
+| `publish_estimate(companyId, retailerId, kpiId, periodMonth, estimateValue, estimateType)` | Insert new estimate for a specific retailer |
 
 ### Connecting to Claude Desktop
 
@@ -208,16 +211,19 @@ Add to Cursor's MCP settings (`~/.cursor/mcp.json`):
 ### Example MCP Interactions
 
 > "List all companies available in the YipitData KPI system"
-→ Agent calls `list_companies()` → returns all 6 companies grouped by sector
+→ Agent calls `list_companies()` → returns all 20 companies across 10 sectors
 
-> "Compare Trendy Shoe Brand's GMV between May 2025 and May 2026, and show their current MTD estimate"
-→ Agent calls `list_kpis()` to resolve GMV id, then calls `compare_periods(companyId=1, kpiId=1, period1="2025-05-01", period2="2026-05-01")` and `get_mtd_snapshot(companyId=1, kpiId=1)` in parallel → returns YOY table + MTD value with as-of timestamp
+> "Compare Trendy Shoe Brand's total GMV between May 2025 and May 2026 across all retailers"
+→ Agent calls `list_kpis()` to resolve GMV id, then `compare_periods(companyId=1, kpiId=1, period1="2025-05-01", period2="2026-05-01")` and `get_mtd_snapshot(companyId=1, kpiId=1)` in parallel → returns aggregated YOY delta + latest intraday MTD per retailer
+
+> "What are Trendy Shoe Brand's GMV numbers through Sole City vs Market Square for May 2026?"
+→ Agent calls `list_retailers()`, `get_company(1)`, then `get_estimates(companyId=1, kpiId=1, retailerId=<sole_city_id>)` and `get_estimates(companyId=1, kpiId=1, retailerId=<market_square_id>)` in parallel → side-by-side retailer comparison
 
 > "Which company in the Footwear sector has the highest GMV last month?"
 → Agent calls `list_companies(sector="footwear")`, then `get_estimates()` for each → compares and ranks
 
-> "Publish a new MTD estimate for Nike's Units Sold of 4,200,000 for June 2026"
-→ Agent calls `list_companies(search="Nike")`, `list_kpis()`, then `publish_estimate(companyId=2, kpiId=2, periodMonth="2026-06-01", estimateValue=4200000, estimateType="mtd")` → triggers SSE notification to all connected web UI users
+> "Publish a new MTD estimate for Trendy Shoe Brand / Sole City GMV of 115,000,000 for June 2026"
+→ Agent calls `list_companies(search="Trendy Shoe Brand")`, `list_retailers()`, `list_kpis()`, then `publish_estimate(companyId=1, retailerId=<sole_city_id>, kpiId=1, periodMonth="2026-06-01", estimateValue=115000000, estimateType="mtd")` → triggers SSE notification to all connected web UI users
 
 ---
 
@@ -242,12 +248,15 @@ For this assessment, JWT is stored in `localStorage` for simplicity. In producti
 
 ## Seed Data
 
-- **3 sectors**: Footwear, Apparel, Electronics
-- **6 companies**: Trendy Shoe Brand, Nike, Adidas, Zara, H&M, Samsung
+Loaded directly from the official assessment dataset (`kpi_sample_corporate_compatible.csv`):
+
+- **10 sectors**: Footwear, Apparel, Electronics, Beauty, Grocery, Beverage, Fitness, Home, Baby, Toys, Pet, Travel, Household
+- **20 companies**: Trendy Shoe Brand, Urban Step, Everyday Threads, Northline Apparel, Luma Devices, Studio Sound, Morning Roast, SnackCraft, Daily Hydrate, Fresh Face Co., Glow Lab Beauty, Modern Table, Nest Home Goods, Little Sprout, Bright Play, Pet Patch, Pulse Wellness, TrailFit Gear, Clean Kind, Aero Luggage
+- **9 retailers**: Sole City, Market Square, StyleMart, Active Outfitters, Fresh Cart, Home Lane, Family Market, Tech Corner, Value Hub
 - **3 KPIs**: GMV (USD), Units Sold (units), ASP (USD)
-- **13 months** of historical estimates per (company, KPI) with seasonal variation
-- **1 MTD** estimate per (company, KPI) at current month
-- Total: **252 estimate rows**
+- **13 months** of historical estimates per (company × retailer × KPI): May 2025 – May 2026
+- **3 MTD intraday snapshots** per (company × retailer × KPI) at 09:00, 13:00, 17:00 on 2026-06-04
+- Total: **2,880 estimate rows**
 
 ---
 

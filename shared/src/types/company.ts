@@ -6,6 +6,13 @@ export interface Sector {
   createdAt: string
 }
 
+export interface Retailer {
+  id: number
+  name: string
+  slug: string
+  createdAt: string
+}
+
 export interface Company {
   id: number
   sectorId: number

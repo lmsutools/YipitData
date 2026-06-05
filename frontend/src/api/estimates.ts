@@ -3,6 +3,7 @@ import type { KpiEstimate, Kpi } from '@yipitdata/shared'
 
 export interface EstimateParams {
   kpiId?: number
+  retailerId?: number
   dateFrom?: string
   dateTo?: string
   type?: 'historical' | 'mtd' | 'all'
@@ -20,6 +21,7 @@ export async function fetchKpis(): Promise<Kpi[]> {
 
 export async function publishEstimate(body: {
   companyId: number
+  retailerId: number
   kpiId: number
   periodMonth: string
   estimateValue: number

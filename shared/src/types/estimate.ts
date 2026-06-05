@@ -3,6 +3,8 @@ export type EstimateType = 'historical' | 'mtd'
 export interface KpiEstimate {
   id: number
   companyId: number
+  retailerId: number
+  retailerName?: string
   kpiId: number
   kpiName?: string
   kpiUnit?: string

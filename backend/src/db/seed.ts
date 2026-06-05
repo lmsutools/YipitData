@@ -1,73 +1,135 @@
 import { db } from './client.js'
-import { sectors, companies, kpis, kpiEstimates, users } from './schema.js'
-import { subMonths, startOfMonth, format } from 'date-fns'
+import { sectors, retailers, companies, kpis, kpiEstimates, users } from './schema.js'
+import { sql } from 'drizzle-orm'
+import { createReadStream } from 'node:fs'
+import { createInterface } from 'node:readline'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+// CSV lives at repo root — three levels up from backend/src/db/
+const CSV_PATH = resolve(__dirname, '../../../kpi_sample_corporate_compatible.csv')
+
+interface CsvRow {
+  company_id: string
+  company_name: string
+  sector: string
+  retailer_id: string
+  retailer_name: string
+  kpi_id: string
+  kpi_name: string
+  period_start: string
+  estimate_type: string
+  value: string
+  unit: string
+  as_of: string
+  last_updated: string
+}
+
+async function parseCsv(filePath: string): Promise<CsvRow[]> {
+  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity })
+  const rows: CsvRow[] = []
+  let headers: string[] = []
+
+  for await (const line of rl) {
+    if (!headers.length) {
+      headers = line.split(',')
+      continue
+    }
+    const values = line.split(',')
+    const row: Record<string, string> = {}
+    headers.forEach((h, i) => { row[h] = values[i] ?? '' })
+    rows.push(row as unknown as CsvRow)
+  }
+  return rows
+}
 
 async function seed() {
-  console.log('🌱 Seeding database...')
+  console.log('🌱 Seeding database from CSV...')
 
-  // Clear existing data
-  await db.delete(kpiEstimates)
-  await db.delete(users)
-  await db.delete(companies)
-  await db.delete(kpis)
-  await db.delete(sectors)
+  const rows = await parseCsv(CSV_PATH)
+  console.log(`  Parsed ${rows.length} CSV rows`)
 
-  // Sectors
-  const [footwear, apparel, electronics] = await db.insert(sectors).values([
-    { name: 'Footwear', slug: 'footwear' },
-    { name: 'Apparel', slug: 'apparel' },
-    { name: 'Electronics', slug: 'electronics' },
-  ]).returning()
+  // Clear all tables in one shot — CASCADE handles FK order
+  await db.execute(sql`TRUNCATE TABLE kpi_estimates, users, companies, retailers, kpis, sectors RESTART IDENTITY CASCADE`)
 
-  // Companies
-  const [tsb, nike, adidas, zara, hm, samsung] = await db.insert(companies).values([
-    {
-      sectorId: footwear!.id,
-      name: 'Trendy Shoe Brand',
-      slug: 'trendy-shoe-brand',
-      description: 'Leading direct-to-consumer footwear brand known for limited-edition drops.',
-    },
-    {
-      sectorId: footwear!.id,
-      name: 'Nike',
-      slug: 'nike',
-      description: 'Global athletic footwear and apparel leader.',
-    },
-    {
-      sectorId: footwear!.id,
-      name: 'Adidas',
-      slug: 'adidas',
-      description: 'International sportswear and footwear manufacturer.',
-    },
-    {
-      sectorId: apparel!.id,
-      name: 'Zara',
-      slug: 'zara',
-      description: 'Fast-fashion global retailer by Inditex.',
-    },
-    {
-      sectorId: apparel!.id,
-      name: 'H&M',
-      slug: 'hm',
-      description: 'Swedish multinational retail-clothing company.',
-    },
-    {
-      sectorId: electronics!.id,
-      name: 'Samsung',
-      slug: 'samsung',
-      description: 'South Korean multinational electronics corporation.',
-    },
-  ]).returning()
 
-  // KPIs
-  const [gmv, units, asp] = await db.insert(kpis).values([
-    { name: 'GMV', unit: 'USD', description: 'Gross Merchandise Value — total sales dollar amount' },
-    { name: 'Units Sold', unit: 'units', description: 'Total number of units sold' },
-    { name: 'ASP', unit: 'USD', description: 'Average Sales Price per unit' },
-  ]).returning()
+  // ── Sectors ───────────────────────────────────────────────────────────────
+  const uniqueSectors = [...new Map(rows.map(r => [r.sector, r.sector])).keys()]
+  const sectorRows = await db.insert(sectors).values(
+    uniqueSectors.map(name => ({
+      name,
+      slug: name.toLowerCase().replace(/\s+/g, '-'),
+    }))
+  ).returning()
+  const sectorByName = new Map(sectorRows.map(s => [s.name, s]))
+  console.log(`  Inserted ${sectorRows.length} sectors`)
 
-  // Users (passwords are bcrypt of the plain text shown — we store pre-hashed for simplicity)
-  // admin123 and user123 — hashed with bcrypt cost 10
+  // ── Retailers ─────────────────────────────────────────────────────────────
+  const uniqueRetailers = [
+    ...new Map(rows.map(r => [r.retailer_id, { id: r.retailer_id, name: r.retailer_name }])).values()
+  ]
+  const retailerRows = await db.insert(retailers).values(
+    uniqueRetailers.map(r => ({ name: r.name, slug: r.id }))
+  ).returning()
+  const retailerBySlug = new Map(retailerRows.map(r => [r.slug, r]))
+  console.log(`  Inserted ${retailerRows.length} retailers`)
+
+  // ── Companies ─────────────────────────────────────────────────────────────
+  const uniqueCompanies = [
+    ...new Map(rows.map(r => [r.company_id, { id: r.company_id, name: r.company_name, sector: r.sector }])).values()
+  ]
+  const companyDescriptions: Record<string, string> = {
+    trendy_shoe_brand: 'Leading direct-to-consumer footwear brand known for limited-edition drops.',
+    urban_step: 'Urban lifestyle footwear label with a strong DTC e-commerce presence.',
+    everyday_threads: 'Affordable everyday apparel brand focused on wardrobe basics.',
+    northline_apparel: 'Outdoor and performance apparel with a loyal community following.',
+    luma_devices: 'Consumer electronics brand specializing in smart home and audio products.',
+    studio_sound: 'Premium audio gear and personal electronics for creative professionals.',
+    morning_roast: 'Specialty coffee and beverage brand distributed through grocery partners.',
+    snackcraft: 'Artisanal snack brand with broad retail distribution across grocery and club.',
+    daily_hydrate: 'Functional hydration and wellness beverages sold through fitness and grocery channels.',
+    fresh_face_co: 'Clean beauty brand with cult-status skincare lines sold through specialty retail.',
+    glow_lab_beauty: 'Science-backed beauty brand with a full skincare and cosmetics portfolio.',
+    modern_table: 'Contemporary home furnishings and tabletop accessories brand.',
+    nest_home_goods: 'Home décor and organizational goods with a minimalist design aesthetic.',
+    little_sprout: 'Baby and toddler essentials brand known for organic and safety-certified products.',
+    bright_play: 'Toy and learning product brand targeting ages 0–12 with award-winning designs.',
+    pet_patch: 'Natural pet food and accessories brand distributed through pet and grocery retail.',
+    pulse_wellness: 'Fitness equipment and wellness supplement brand sold through DTC and gym partners.',
+    trailfit_gear: 'Outdoor fitness and trail running gear with a strong running-community presence.',
+    clean_kind: 'Eco-friendly household cleaning products with plastic-free packaging.',
+    aero_luggage: 'Lightweight premium luggage and travel accessories brand.',
+  }
+  const companyRows = await db.insert(companies).values(
+    uniqueCompanies.map(c => ({
+      sectorId: sectorByName.get(c.sector)!.id,
+      name: c.name,
+      slug: c.id,
+      description: companyDescriptions[c.id] ?? null,
+    }))
+  ).returning()
+  const companyBySlug = new Map(companyRows.map(c => [c.slug, c]))
+  console.log(`  Inserted ${companyRows.length} companies`)
+
+  // ── KPIs ──────────────────────────────────────────────────────────────────
+  const kpiDescriptions: Record<string, { unit: string; description: string }> = {
+    gmv:        { unit: 'USD',   description: 'Gross Merchandise Value — total sales dollar amount' },
+    units_sold: { unit: 'units', description: 'Total number of units sold' },
+    asp:        { unit: 'USD',   description: 'Average Sales Price per unit' },
+  }
+  const uniqueKpis = [...new Map(rows.map(r => [r.kpi_id, { id: r.kpi_id, name: r.kpi_name, unit: r.unit }])).values()]
+  const kpiRows = await db.insert(kpis).values(
+    uniqueKpis.map(k => ({
+      name: k.name,
+      unit: kpiDescriptions[k.id]?.unit ?? k.unit,
+      description: kpiDescriptions[k.id]?.description ?? null,
+    }))
+  ).returning()
+  const kpiByName = new Map(kpiRows.map(k => [k.name, k]))
+  console.log(`  Inserted ${kpiRows.length} KPIs`)
+
+  // ── Users ─────────────────────────────────────────────────────────────────
   await db.insert(users).values([
     {
       email: 'admin@yipit.com',
@@ -81,79 +143,44 @@ async function seed() {
     },
   ])
 
-  // Generate 13 months of historical estimates + 1 MTD
-  const allCompanies = [tsb!, nike!, adidas!, zara!, hm!, samsung!]
-  const allKpis = [gmv!, units!, asp!]
-
-  // Base monthly GMV values per company (in millions USD)
-  const baseGmv: Record<string, number> = {
-    'trendy-shoe-brand': 28_000_000,
-    'nike': 1_100_000_000,
-    'adidas': 600_000_000,
-    'zara': 450_000_000,
-    'hm': 380_000_000,
-    'samsung': 2_800_000_000,
-  }
-
-  const baseUnits: Record<string, number> = {
-    'trendy-shoe-brand': 120_000,
-    'nike': 4_500_000,
-    'adidas': 2_800_000,
-    'zara': 3_200_000,
-    'hm': 5_000_000,
-    'samsung': 6_000_000,
-  }
-
-  const now = new Date()
+  // ── Estimates ─────────────────────────────────────────────────────────────
   const estimateRows: (typeof kpiEstimates.$inferInsert)[] = []
 
-  for (const company of allCompanies) {
-    const gmvBase = baseGmv[company.slug]!
-    const unitsBase = baseUnits[company.slug]!
+  for (const row of rows) {
+    const company = companyBySlug.get(row.company_id)
+    const retailer = retailerBySlug.get(row.retailer_id)
+    const kpi = kpiByName.get(row.kpi_name)
 
-    for (let i = 13; i >= 1; i--) {
-      const monthDate = startOfMonth(subMonths(now, i))
-      const periodMonth = format(monthDate, 'yyyy-MM-dd')
-
-      // Seasonal multiplier: Q4 boost, Q1 dip
-      const month = monthDate.getMonth() + 1
-      const seasonal = month >= 10 ? 1.25 : month <= 2 ? 0.85 : 1.0
-      // YOY growth: ~8% annually
-      const yoyFactor = i > 12 ? 0.92 : 1.0
-      const noise = () => 0.92 + Math.random() * 0.16
-
-      const gmvValue = Math.round(gmvBase * seasonal * yoyFactor * noise())
-      const unitsValue = Math.round(unitsBase * seasonal * yoyFactor * noise())
-      const aspValue = Math.round((gmvValue / unitsValue) * 100) / 100
-
-      estimateRows.push(
-        { companyId: company.id, kpiId: gmv!.id, periodMonth, estimateValue: String(gmvValue), estimateType: 'historical', publishedAt: new Date(), updatedAt: new Date() },
-        { companyId: company.id, kpiId: units!.id, periodMonth, estimateValue: String(unitsValue), estimateType: 'historical', publishedAt: new Date(), updatedAt: new Date() },
-        { companyId: company.id, kpiId: asp!.id, periodMonth, estimateValue: String(aspValue), estimateType: 'historical', publishedAt: new Date(), updatedAt: new Date() },
-      )
+    if (!company || !retailer || !kpi) {
+      console.warn(`  Skipping row — missing ref: company=${row.company_id} retailer=${row.retailer_id} kpi=${row.kpi_name}`)
+      continue
     }
 
-    // MTD estimate for current month
-    const currentPeriod = format(startOfMonth(now), 'yyyy-MM-dd')
-    const mtdFraction = now.getDate() / 28  // approx month progress
-    const seasonal = (now.getMonth() + 1) >= 10 ? 1.25 : (now.getMonth() + 1) <= 2 ? 0.85 : 1.0
-    const gmvMtd = Math.round(gmvBase * seasonal * mtdFraction * (0.95 + Math.random() * 0.1))
-    const unitsMtd = Math.round(unitsBase * seasonal * mtdFraction * (0.95 + Math.random() * 0.1))
-    const aspMtd = Math.round((gmvMtd / unitsMtd) * 100) / 100
+    const periodMonth = row.period_start.substring(0, 10)   // YYYY-MM-DD
+    const asOf = row.as_of ? new Date(row.as_of) : null
+    const lastUpdated = row.last_updated ? new Date(row.last_updated) : new Date()
 
-    estimateRows.push(
-      { companyId: company.id, kpiId: gmv!.id, periodMonth: currentPeriod, estimateValue: String(gmvMtd), estimateType: 'mtd', asOfTimestamp: now, publishedAt: now, updatedAt: now },
-      { companyId: company.id, kpiId: units!.id, periodMonth: currentPeriod, estimateValue: String(unitsMtd), estimateType: 'mtd', asOfTimestamp: now, publishedAt: now, updatedAt: now },
-      { companyId: company.id, kpiId: asp!.id, periodMonth: currentPeriod, estimateValue: String(aspMtd), estimateType: 'mtd', asOfTimestamp: now, publishedAt: now, updatedAt: now },
-    )
+    estimateRows.push({
+      companyId: company.id,
+      retailerId: retailer.id,
+      kpiId: kpi.id,
+      periodMonth,
+      estimateValue: row.value,
+      estimateType: row.estimate_type as 'historical' | 'mtd',
+      asOfTimestamp: asOf,
+      publishedAt: lastUpdated,
+      updatedAt: lastUpdated,
+    })
   }
 
-  // Insert in batches of 50
-  for (let i = 0; i < estimateRows.length; i += 50) {
-    await db.insert(kpiEstimates).values(estimateRows.slice(i, i + 50))
+  // Insert in batches of 100
+  let inserted = 0
+  for (let i = 0; i < estimateRows.length; i += 100) {
+    await db.insert(kpiEstimates).values(estimateRows.slice(i, i + 100))
+    inserted += Math.min(100, estimateRows.length - i)
   }
 
-  console.log(`✅ Seeded: ${allCompanies.length} companies, ${allKpis.length} KPIs, ${estimateRows.length} estimates`)
+  console.log(`✅ Seeded: ${companyRows.length} companies, ${retailerRows.length} retailers, ${kpiRows.length} KPIs, ${inserted} estimates`)
   process.exit(0)
 }
 

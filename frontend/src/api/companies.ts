@@ -1,8 +1,13 @@
 import { apiClient } from './client'
-import type { Company, Sector } from '@yipitdata/shared'
+import type { Company, Sector, Retailer } from '@yipitdata/shared'
 
 export async function fetchSectors(): Promise<Sector[]> {
   const { data } = await apiClient.get<Sector[]>('/sectors')
+  return data
+}
+
+export async function fetchRetailers(): Promise<Retailer[]> {
+  const { data } = await apiClient.get<Retailer[]>('/retailers')
   return data
 }
 
@@ -11,12 +16,14 @@ export async function fetchCompanies(params?: { sector?: string; search?: string
   return data
 }
 
-export async function fetchCompany(id: number): Promise<Company & { mtdEstimates: MtdEstimate[] }> {
+export async function fetchCompany(id: number): Promise<Company & { retailers: Retailer[]; mtdEstimates: MtdEstimate[] }> {
   const { data } = await apiClient.get(`/companies/${id}`)
   return data
 }
 
 export interface MtdEstimate {
+  retailerId: number
+  retailerName: string
   kpiId: number
   kpiName: string
   kpiUnit: string

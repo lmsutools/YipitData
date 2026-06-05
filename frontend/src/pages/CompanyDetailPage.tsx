@@ -8,6 +8,7 @@ import { KpiChart } from '../components/charts/KpiChart'
 import { PublishEstimateModal } from '../components/ui/PublishEstimateModal'
 import { formatValue, exportToCsv } from '../utils/format'
 import { useAuth } from '../contexts/AuthContext'
+import type { KpiEstimate } from '@yipitdata/shared'
 
 const DEFAULT_DATE_FROM = format(startOfMonth(subMonths(new Date(), 13)), 'yyyy-MM-dd')
 const DEFAULT_DATE_TO = format(startOfMonth(new Date()), 'yyyy-MM-dd')
@@ -20,6 +21,7 @@ export function CompanyDetailPage() {
   const isAdmin = user?.role === 'admin'
 
   const [activeKpiId, setActiveKpiId] = useState<number | null>(null)
+  const [activeRetailerId, setActiveRetailerId] = useState<number | null>(null)
   const [showYoy, setShowYoy] = useState(false)
   const [showMom, setShowMom] = useState(true)
   const [showPublish, setShowPublish] = useState(false)
@@ -38,9 +40,10 @@ export function CompanyDetailPage() {
   })
 
   const { data: estimates = [], isLoading: estimatesLoading } = useQuery({
-    queryKey: ['estimates', companyId, activeKpiId, dateFrom, dateTo],
+    queryKey: ['estimates', companyId, activeKpiId, activeRetailerId, dateFrom, dateTo],
     queryFn: () => fetchEstimates(companyId, {
       kpiId: activeKpiId ?? undefined,
+      retailerId: activeRetailerId ?? undefined,
       dateFrom,
       dateTo,
       type: 'all',
@@ -57,29 +60,63 @@ export function CompanyDetailPage() {
   }, [kpis, activeKpiId])
 
   const activeKpi = kpis.find((k) => k.id === activeKpiId)
+  const companyRetailers = company?.retailers ?? []
 
   const filteredEstimates = useMemo(() => {
     if (!activeKpiId) return estimates
     return estimates.filter((e) => e.kpiId === activeKpiId)
   }, [estimates, activeKpiId])
 
-  // Get MTD estimate for active KPI
+  // Aggregate estimates across retailers for chart (sum for GMV/Units, avg for ASP)
+  const aggregatedEstimates = useMemo((): KpiEstimate[] => {
+    if (!filteredEstimates.length) return []
+    const isAvg = activeKpi?.unit === 'USD' && activeKpi?.name === 'ASP'
+
+    // Group by (periodMonth, estimateType, asOfTimestamp)
+    const grouped = new Map<string, { sum: number; count: number; row: KpiEstimate }>()
+    for (const e of filteredEstimates) {
+      const key = `${e.periodMonth}|${e.estimateType}|${e.asOfTimestamp ?? ''}`
+      const existing = grouped.get(key)
+      const val = parseFloat(String(e.estimateValue))
+      if (existing) {
+        existing.sum += val
+        existing.count++
+      } else {
+        grouped.set(key, { sum: val, count: 1, row: e })
+      }
+    }
+
+    return [...grouped.values()].map(({ sum, count, row }) => ({
+      ...row,
+      estimateValue: isAvg ? sum / count : sum,
+    }))
+  }, [filteredEstimates, activeKpi])
+
+  // MTD: latest snapshot per kpi across all retailers (or filtered retailer)
   const mtdEstimate = useMemo(() => {
     if (!activeKpiId || !company?.mtdEstimates) return null
-    return company.mtdEstimates.find((m: { kpiId: number }) => m.kpiId === activeKpiId) ?? null
-  }, [activeKpiId, company])
+    const relevant = company.mtdEstimates.filter((m) =>
+      m.kpiId === activeKpiId &&
+      (activeRetailerId === null || m.retailerId === activeRetailerId)
+    )
+    if (!relevant.length) return null
+    // Use the most recent as_of
+    return relevant.sort((a, b) =>
+      (b.asOfTimestamp ?? '').localeCompare(a.asOfTimestamp ?? '')
+    )[0]
+  }, [activeKpiId, activeRetailerId, company])
 
-  // Latest historical for header stat
   const latestHistorical = useMemo(() => {
-    const historicals = filteredEstimates
+    const historicals = aggregatedEstimates
       .filter((e) => e.estimateType === 'historical')
       .sort((a, b) => b.periodMonth.localeCompare(a.periodMonth))
     return historicals[0] ?? null
-  }, [filteredEstimates])
+  }, [aggregatedEstimates])
 
   const handleExport = () => {
-    const rows = filteredEstimates.map((e) => ({
+    const rows = aggregatedEstimates.map((e) => ({
       company: company?.name ?? '',
+      retailer: activeRetailerId ? companyRetailers.find(r => r.id === activeRetailerId)?.name ?? 'all' : 'all retailers',
       kpi: e.kpiName ?? '',
       unit: e.kpiUnit ?? '',
       period: e.periodMonth,
@@ -117,10 +154,12 @@ export function CompanyDetailPage() {
         <PublishEstimateModal
           companyId={companyId}
           companyName={company.name}
+          retailers={companyRetailers}
           kpis={kpis}
           onClose={() => setShowPublish(false)}
         />
       )}
+
       {/* Breadcrumb */}
       <nav className="flex items-center gap-2 text-sm text-gray-400 mb-6">
         <Link to="/" className="hover:text-blue-600 transition-colors">Dashboard</Link>
@@ -129,7 +168,7 @@ export function CompanyDetailPage() {
       </nav>
 
       {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-4 mb-8">
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div>
           <div className="flex items-center gap-3 mb-1">
             <h1 className="text-2xl font-bold text-gray-900">{company.name}</h1>
@@ -162,11 +201,44 @@ export function CompanyDetailPage() {
                 <p className="text-xs text-amber-500">
                   As of {mtdEstimate.asOfTimestamp ? format(new Date(mtdEstimate.asOfTimestamp), 'MMM d, h:mm a') : '—'}
                 </p>
+                {mtdEstimate.retailerName && (
+                  <p className="text-xs text-amber-400 mt-0.5">{mtdEstimate.retailerName}</p>
+                )}
               </div>
             )}
           </div>
         )}
       </div>
+
+      {/* Retailer filter pills */}
+      {companyRetailers.length > 1 && (
+        <div className="flex flex-wrap gap-2 mb-5">
+          <span className="text-xs text-gray-400 self-center mr-1">Retailer:</span>
+          <button
+            onClick={() => setActiveRetailerId(null)}
+            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+              activeRetailerId === null
+                ? 'bg-gray-800 text-white border-gray-800'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+            }`}
+          >
+            All Retailers
+          </button>
+          {companyRetailers.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => setActiveRetailerId(r.id)}
+              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                activeRetailerId === r.id
+                  ? 'bg-gray-800 text-white border-gray-800'
+                  : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+              }`}
+            >
+              {r.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* KPI Tabs */}
       <div className="flex gap-2 mb-6">
@@ -193,6 +265,11 @@ export function CompanyDetailPage() {
           <div className="flex items-center gap-4">
             <h2 className="font-semibold text-gray-900">
               {activeKpi?.name} — {company.name}
+              {activeRetailerId && (
+                <span className="ml-2 text-sm font-normal text-gray-400">
+                  ({companyRetailers.find(r => r.id === activeRetailerId)?.name})
+                </span>
+              )}
             </h2>
             <div className="flex items-center gap-1">
               <span className="inline-block w-3 h-3 rounded-sm bg-blue-500 opacity-80" />
@@ -251,12 +328,12 @@ export function CompanyDetailPage() {
           </div>
         </div>
 
-        {/* Chart */}
+        {/* Chart — uses aggregated (or single-retailer) data */}
         {estimatesLoading ? (
           <div className="h-80 bg-gray-50 animate-pulse rounded-xl" />
         ) : (
           <KpiChart
-            estimates={filteredEstimates}
+            estimates={aggregatedEstimates}
             kpiUnit={activeKpi?.unit ?? 'USD'}
             showYoy={showYoy}
             showMom={showMom}
@@ -269,6 +346,9 @@ export function CompanyDetailPage() {
             Last updated: {format(new Date(latestHistorical.updatedAt), 'MMM d, yyyy h:mm a')}
             {mtdEstimate?.asOfTimestamp && (
               <> · MTD as-of: {format(new Date(mtdEstimate.asOfTimestamp), 'MMM d, yyyy h:mm a')}</>
+            )}
+            {!activeRetailerId && companyRetailers.length > 1 && (
+              <span className="ml-1 text-gray-300">· values aggregated across {companyRetailers.length} retailers</span>
             )}
           </p>
         )}
@@ -285,6 +365,7 @@ export function CompanyDetailPage() {
               <thead>
                 <tr className="bg-gray-50 text-left">
                   <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Period</th>
+                  <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Retailer</th>
                   <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">KPI</th>
                   <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Type</th>
                   <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide text-right">Value</th>
@@ -294,12 +375,13 @@ export function CompanyDetailPage() {
               <tbody className="divide-y divide-gray-50">
                 {[...filteredEstimates]
                   .sort((a, b) => b.periodMonth.localeCompare(a.periodMonth))
-                  .slice(0, 20)
+                  .slice(0, 30)
                   .map((e) => (
                     <tr key={e.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-6 py-3 text-gray-700 font-medium">
                         {format(parseISO(e.periodMonth), 'MMM yyyy')}
                       </td>
+                      <td className="px-6 py-3 text-gray-500 text-xs">{e.retailerName}</td>
                       <td className="px-6 py-3 text-gray-600">{e.kpiName}</td>
                       <td className="px-6 py-3">
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${

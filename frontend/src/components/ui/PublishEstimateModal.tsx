@@ -3,24 +3,26 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { format, startOfMonth } from 'date-fns'
 import { publishEstimate } from '../../api/estimates'
 import toast from 'react-hot-toast'
-import type { Kpi } from '@yipitdata/shared'
+import type { Kpi, Retailer } from '@yipitdata/shared'
 
 interface Props {
   companyId: number
   companyName: string
+  retailers: Retailer[]
   kpis: Kpi[]
   onClose: () => void
 }
 
-export function PublishEstimateModal({ companyId, companyName, kpis, onClose }: Props) {
+export function PublishEstimateModal({ companyId, companyName, retailers, kpis, onClose }: Props) {
   const queryClient = useQueryClient()
   const [kpiId, setKpiId] = useState<number>(kpis[0]?.id ?? 0)
+  const [retailerId, setRetailerId] = useState<number>(retailers[0]?.id ?? 0)
   const [periodMonth, setPeriodMonth] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'))
   const [estimateValue, setEstimateValue] = useState('')
   const [estimateType, setEstimateType] = useState<'historical' | 'mtd'>('mtd')
 
   const mutation = useMutation({
-    mutationFn: () => publishEstimate({ companyId, kpiId, periodMonth, estimateValue: parseFloat(estimateValue), estimateType }),
+    mutationFn: () => publishEstimate({ companyId, retailerId, kpiId, periodMonth, estimateValue: parseFloat(estimateValue), estimateType }),
     onSuccess: () => {
       toast.success('Estimate published — all connected clients notified via SSE')
       queryClient.invalidateQueries({ queryKey: ['estimates', companyId] })
@@ -37,6 +39,10 @@ export function PublishEstimateModal({ companyId, companyName, kpis, onClose }: 
     e.preventDefault()
     if (!estimateValue || isNaN(parseFloat(estimateValue))) {
       toast.error('Enter a valid numeric value')
+      return
+    }
+    if (!retailerId) {
+      toast.error('Select a retailer')
       return
     }
     mutation.mutate()
@@ -59,6 +65,19 @@ export function PublishEstimateModal({ companyId, companyName, kpis, onClose }: 
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Retailer</label>
+            <select
+              value={retailerId}
+              onChange={(e) => setRetailerId(Number(e.target.value))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {retailers.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">KPI</label>
             <select

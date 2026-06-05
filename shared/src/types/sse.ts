@@ -10,6 +10,8 @@ export interface NewEstimatePayload {
   estimateId: number
   companyId: number
   companyName: string
+  retailerId: number
+  retailerName: string
   kpiId: number
   kpiName: string
   periodMonth: string
